@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { estimatePromptTokens, resolveCursorUsage } from "./prompt-usage.ts";
 import { type BridgeHandle, type BridgeStreams, createBridgeHandle } from "./bridge-handle.ts";
 import { startSSEResponse } from "./sse-keepalive.ts";
+import { formatStallDuration, resolveUpstreamStallTimeoutMs, startUpstreamWatchdog } from "./upstream-watchdog.ts";
 import {
   requestActionText,
   historyForRebuild,
@@ -1537,6 +1538,7 @@ function writeSSEStream(
     if (closed) return;
     closed = true;
     stopKeepalive();
+    upstreamWatchdog.stop();
     res.end();
   };
 
@@ -1544,6 +1546,21 @@ function writeSSEStream(
     id: completionId, object: "chat.completion.chunk", created, model: modelId,
     choices: [{ index: 0, delta, finish_reason: finishReason }],
   });
+
+  // The keepalive above guarantees the client never gives up on us; this guarantees we give up
+  // on Cursor when it has abandoned the turn. Every upstream frame resets it (see processChunk).
+  const upstreamWatchdog = startUpstreamWatchdog((silentForMs) => {
+    if (closed) return;
+    const message = `Cursor produced no output for ${formatStallDuration(silentForMs)}; stream timed out`;
+    console.error(`[cursor-provider] Upstream stall (${modelId}):`, message);
+    debugLog("stream.upstream_stall", { requestId, bridgeKey, convKey, modelId, silentForMs });
+    cancelled = true;
+    cleanupBridge(bridge, heartbeatTimer, bridgeKey);
+    sendSSE(makeChunk({ content: message }, "error"));
+    sendSSE(makeUsageChunk());
+    sendDone();
+    closeResponse();
+  }, resolveUpstreamStallTimeoutMs());
 
   const makeUsageChunk = () => {
     const { prompt_tokens, completion_tokens, total_tokens } = computeUsage(state);
@@ -1656,10 +1673,14 @@ function writeSSEStream(
     },
   );
 
-  bridge.onData(processChunk);
+  bridge.onData((chunk) => {
+    upstreamWatchdog.touch();
+    processChunk(chunk);
+  });
 
   bridge.onClose((code) => {
     debugLog("stream.bridge_close", { requestId, bridgeKey, convKey, code, cancelled, mcpExecReceived, currentTurn, latestCheckpoint });
+    upstreamWatchdog.stop();
     clearInterval(heartbeatTimer);
     req.removeListener("close", onClientClose);
     res.removeListener("close", onClientClose);
