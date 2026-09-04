@@ -1,18 +1,10 @@
 /**
- * The counterpart to the SSE keepalive.
- *
- * Keepalives make sure a healthy-but-quiet turn is never cut off by a timer on the client side.
- * That also means nothing on the client side can end a turn Cursor has silently abandoned — and
- * Cursor does abandon turns: the h2 stream stays up, heartbeats are acknowledged, and no
- * interaction update ever arrives again. Left alone such a turn sits on "Working…" forever.
- *
- * So progress is judged where it can actually be observed: on frames coming back from Cursor.
- * Every server message, including thinking deltas, blob traffic, and checkpoints, pushes the
- * deadline back. Only a stream that has produced *nothing* for the whole window is declared
- * stalled, and the proxy then ends the turn with an explicit error so Pi and failover can react.
+ * SSE keepalives preserve the client connection even when Cursor stops making progress.
+ * The proxy resets this timer for decoded non-heartbeat messages, including thinking,
+ * blob requests, and checkpoints. Heartbeats and incomplete frames do not reset it.
  */
 
-/** Five minutes of complete upstream silence. Real thinks stream `thinkingDelta` well within this. */
+/** Fail after five minutes without observed progress; this is a configurable timeout policy. */
 export const UPSTREAM_STALL_TIMEOUT_MS = 5 * 60_000;
 
 /** `PI_CURSOR_UPSTREAM_STALL_MS` overrides the window; `0` disables the watchdog. */
@@ -34,7 +26,7 @@ export function formatStallDuration(ms: number): string {
 }
 
 export interface UpstreamWatchdog {
-  /** Record upstream progress; the stall deadline moves forward. */
+  /** Record decoded upstream progress; the stall deadline moves forward. */
   touch(): void;
   /** Retire the watchdog. Idempotent; later touches are ignored. */
   stop(): void;

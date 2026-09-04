@@ -4340,6 +4340,51 @@ test("does not re-resume from a successful assistant turn (the 'Cannot continue 
 	);
 });
 
+test("successful completion cancels a pending same-model retry", async () => {
+	const t = setup({
+		accounts: ONE_ACCOUNT,
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: { transientCooldownMs: 25, pendingPollMs: 25 },
+		omitContinueAgent: true,
+	});
+	await t.fire("session_start");
+	try {
+		await finishError(t, "anthropic", "claude-opus-4-8", "500 server error");
+		assert.ok(t.readState().pendingFrom, "a retry must be pending before completion");
+		const ok = okAssistant("anthropic", "claude-opus-4-8");
+		await t.fire("message_end", { message: ok });
+		await t.fire("agent_end", { messages: [ok] });
+		assert.equal(t.readState().pendingFrom, undefined, "completion must clear the pending retry");
+		await wait(1100);
+		assert.equal(t.rec.sent.length, 0, "completed work must not receive a synthetic retry prompt");
+		assert.equal(t.rec.continueCalls.length, 0);
+	} finally {
+		await t.fire("session_shutdown");
+	}
+});
+
+test("successful completion cancels a resume already waiting for the host to go idle", async () => {
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		idle: false,
+	});
+	try {
+		await t.fire("before_agent_start", {});
+		const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
+		await t.fire("message_end", { message: err });
+		const pending = t.fire("agent_end", { messages: [err] });
+		await wait(30);
+		await t.fire("agent_end", { messages: [okAssistant(t.ctx.model.provider, t.ctx.model.id)] });
+		t.setIdle(true);
+		await pending;
+		assert.equal(t.rec.continueCalls.length, 0, "an in-flight resume must not restart completed work");
+		assert.equal(t.rec.sent.length, 0);
+	} finally {
+		t.setIdle(true);
+		await t.fire("session_shutdown");
+	}
+});
+
 test("an un-continuable resume (e.g. tail aborted by the watchdog) recovers by injecting the continuation prompt — never a red error", async () => {
 	const t = setup({
 		current: { provider: "anthropic", id: "claude-opus-4-8" },

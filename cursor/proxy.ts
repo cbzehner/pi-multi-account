@@ -1547,8 +1547,7 @@ function writeSSEStream(
     choices: [{ index: 0, delta, finish_reason: finishReason }],
   });
 
-  // The keepalive above guarantees the client never gives up on us; this guarantees we give up
-  // on Cursor when it has abandoned the turn. Every upstream frame resets it (see processChunk).
+  // Keepalives preserve the client connection; decoded progress bounds the upstream wait.
   const upstreamWatchdog = startUpstreamWatchdog((silentForMs) => {
     if (closed) return;
     const message = `Cursor produced no output for ${formatStallDuration(silentForMs)}; stream timed out`;
@@ -1592,6 +1591,12 @@ function writeSSEStream(
     (messageBytes) => {
       try {
         const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
+        if (serverMessage.message.case !== undefined &&
+          (serverMessage.message.case !== "interactionUpdate" ||
+            (serverMessage.message.value.message.case !== undefined &&
+              serverMessage.message.value.message.case !== "heartbeat"))) {
+          upstreamWatchdog.touch();
+        }
         processServerMessage(
           serverMessage, blobStore, mcpTools,
           (data) => bridge.write(data),
@@ -1673,10 +1678,7 @@ function writeSSEStream(
     },
   );
 
-  bridge.onData((chunk) => {
-    upstreamWatchdog.touch();
-    processChunk(chunk);
-  });
+  bridge.onData(processChunk);
 
   bridge.onClose((code) => {
     debugLog("stream.bridge_close", { requestId, bridgeKey, convKey, code, cancelled, mcpExecReceived, currentTurn, latestCheckpoint });
