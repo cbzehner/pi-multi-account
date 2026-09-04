@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A second concurrent Pi session no longer hangs before it can submit prompts.** When another process owns the canonical child-proxy port, the fallback listener now retries on an ephemeral port on the next event-loop turn and resolves from a standalone `listening` handler. This avoids leaving `session_start` pending forever under Pi's compiled Bun runtime after `EADDRINUSE`.
 - **Long silent Cursor thinks no longer fail with `Request timed out.`** The proxy now flushes SSE headers as soon as a stream opens and writes an SSE comment every 15 seconds until the turn ends. Before, `writeHead()` alone left the head buffered until the first token, so during a multi-minute think the client had received nothing, Pi aborted around the 5-minute mark, and failover re-sent (and re-billed) the prompt.
+- **Turns that Cursor silently abandons now end with an explicit error instead of hanging forever.** With keepalives holding the client connection open, nothing downstream could end a turn whose upstream h2 stream stayed up but never produced another frame. The proxy now watches upstream progress: if Cursor sends nothing at all for 5 minutes (thinking deltas, blob traffic, and checkpoints all count), the stream ends with `Cursor produced no output for 5m; stream timed out`, the bridge is cancelled, and failover can react. `PI_CURSOR_UPSTREAM_STALL_MS` adjusts the window; `0` disables it.
+
+### Tests
+
+- Added `test/cursor-upstream-watchdog.test.ts`: fires once after silence, every upstream frame pushes the deadline back, stop retires it, `0` disables it, env override parsing, and duration formatting.
 
 ## [1.21.1] - 2026-09-03
 
