@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A second concurrent Pi session no longer hangs before it can submit prompts.** When another process owns the canonical child-proxy port, the fallback listener now retries on an ephemeral port on the next event-loop turn and resolves from a standalone `listening` handler. This avoids leaving `session_start` pending forever under Pi's compiled Bun runtime after `EADDRINUSE`.
+- **Long silent Cursor thinks no longer fail with `Request timed out.`** The proxy now flushes SSE headers as soon as a stream opens and writes an SSE comment every 15 seconds until the turn ends. Before, `writeHead()` alone left the head buffered until the first token, so during a multi-minute think the client had received nothing, Pi aborted around the 5-minute mark, and failover re-sent (and re-billed) the prompt.
 
 ## [1.21.1] - 2026-09-03
 

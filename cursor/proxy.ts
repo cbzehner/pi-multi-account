@@ -15,6 +15,7 @@ import { resolve as pathResolve, dirname, join as pathJoin } from "node:path";
 import { fileURLToPath } from "node:url";
 import { estimatePromptTokens, resolveCursorUsage } from "./prompt-usage.ts";
 import { type BridgeHandle, type BridgeStreams, createBridgeHandle } from "./bridge-handle.ts";
+import { startSSEResponse } from "./sse-keepalive.ts";
 import {
   requestActionText,
   historyForRebuild,
@@ -1521,11 +1522,7 @@ function writeSSEStream(
   const completionId = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 28)}`;
   const created = Math.floor(Date.now() / 1000);
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
-  });
+  const stopKeepalive = startSSEResponse(res);
 
   let closed = false;
   const sendSSE = (data: object) => {
@@ -1539,6 +1536,7 @@ function writeSSEStream(
   const closeResponse = () => {
     if (closed) return;
     closed = true;
+    stopKeepalive();
     res.end();
   };
 
