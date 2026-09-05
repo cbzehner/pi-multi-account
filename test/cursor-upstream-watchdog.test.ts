@@ -64,6 +64,10 @@ test("default timeout is five minutes and the env override is honoured", () => {
   assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "0" }), 0, "0 disables");
   assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "soon" }), UPSTREAM_STALL_TIMEOUT_MS, "garbage falls back");
   assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "-5" }), UPSTREAM_STALL_TIMEOUT_MS, "negative falls back");
+  assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "0.5" }), UPSTREAM_STALL_TIMEOUT_MS, "fractions must not disable the watchdog");
+  assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "1.5" }), UPSTREAM_STALL_TIMEOUT_MS, "fractional milliseconds fall back");
+  assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "2147483647" }), 2_147_483_647, "largest supported timer delay is valid");
+  assert.equal(resolveUpstreamStallTimeoutMs({ PI_CURSOR_UPSTREAM_STALL_MS: "2147483648" }), UPSTREAM_STALL_TIMEOUT_MS, "overflow must not become a one-millisecond timeout");
 });
 
 test("stall durations read naturally in the error surfaced to the user", () => {

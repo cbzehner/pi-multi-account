@@ -11,6 +11,7 @@ const INTERVAL_MS = 40;
 
 async function withSilentServer(
   run: (harness: { port: number; response: () => ServerResponse; stop: () => void; writes: () => number }) => Promise<void>,
+  keepaliveIntervalMs = INTERVAL_MS,
 ): Promise<void> {
   let response: ServerResponse | undefined;
   let stop = () => {};
@@ -19,7 +20,7 @@ async function withSilentServer(
     response = res;
     const write = res.write.bind(res);
     res.write = ((chunk: any, ...rest: any[]) => (writes += 1, (write as any)(chunk, ...rest))) as typeof res.write;
-    stop = startSSEResponse(res, INTERVAL_MS);
+    stop = startSSEResponse(res, keepaliveIntervalMs);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as { port: number };
@@ -31,6 +32,7 @@ async function withSilentServer(
       writes: () => writes,
     });
   } finally {
+    stop();
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -69,7 +71,7 @@ test("headers reach the client before upstream emits its first byte", async () =
     assert.equal(res.statusCode, 200);
     assert.equal(res.headers["content-type"], "text/event-stream");
     res.destroy();
-  });
+  }, 2_000);
 });
 
 test("keepalive comments flow during silence", async () => {

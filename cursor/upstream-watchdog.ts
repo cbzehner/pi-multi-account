@@ -12,8 +12,9 @@ export function resolveUpstreamStallTimeoutMs(env: NodeJS.ProcessEnv = process.e
   const raw = env.PI_CURSOR_UPSTREAM_STALL_MS?.trim();
   if (raw === undefined || raw === "") return UPSTREAM_STALL_TIMEOUT_MS;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return UPSTREAM_STALL_TIMEOUT_MS;
-  return Math.floor(parsed);
+  // Node reduces delays above its signed 32-bit limit to one millisecond.
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 2_147_483_647) return UPSTREAM_STALL_TIMEOUT_MS;
+  return parsed;
 }
 
 export function formatStallDuration(ms: number): string {

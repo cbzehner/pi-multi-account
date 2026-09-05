@@ -279,6 +279,7 @@ function setup(opts: {
 	seedCooldownsMsFromNow?: Record<string, number>;
 	seedState?: Record<string, unknown>;
 	setModelFailures?: string[];
+	setModelBlocks?: () => Promise<void>;
 	forceRefreshResults?: Record<
 		string,
 		| { status: "refreshed" }
@@ -605,6 +606,7 @@ function setup(opts: {
 			const target = `${model.provider}/${model.id}`;
 			rec.setModels.push(target);
 			if (opts.setModelFailures?.includes(target)) return false;
+			if (opts.setModelBlocks) await opts.setModelBlocks();
 			ctx.model = mkModel(model.provider, model.id);
 			// Pi applies a model default/clamp before emitting model_select.
 			const previousThinkingLevel = sessionThinkingLevel;
@@ -4384,6 +4386,168 @@ test("successful completion cancels a resume already waiting for the host to go 
 		await t.fire("session_shutdown");
 	}
 });
+
+test("successful completion cancels a retry waiting for its model switch", async () => {
+	let release: () => void = () => {};
+	const blocked = new Promise<void>((resolve) => { release = resolve; });
+	let switchStarted = false;
+	let blockSwitch = false;
+	const t = setup({
+		accounts: ONE_ACCOUNT,
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: { transientCooldownMs: 25, pendingPollMs: 25 },
+		omitContinueAgent: true,
+		setModelBlocks: async () => {
+			if (blockSwitch) {
+				switchStarted = true;
+				await blocked;
+			}
+		},
+	});
+	await t.fire("session_start");
+	try {
+		await finishError(t, "anthropic", "claude-opus-4-8", "500 server error");
+		t.setCurrent("anthropic", "claude-sonnet-4-6");
+		blockSwitch = true;
+		await wait(1100);
+		assert.ok(switchStarted, "the retry must be waiting for its model switch");
+		await t.fire("agent_end", { messages: [okAssistant(t.ctx.model.provider, t.ctx.model.id)] });
+		release();
+		await wait(30);
+		assert.equal(t.rec.sent.length, 0, "a completed model switch must not inject a stale retry");
+		assert.equal(t.readState().pendingFrom, undefined);
+	} finally {
+		release();
+		await t.fire("session_shutdown");
+	}
+});
+
+test("successful completion cancels prompt injection after a pending continuation rejects", async () => {
+	let release: () => void = () => {};
+	const blocked = new Promise<void>((resolve) => { release = resolve; });
+	const t = setup({
+		accounts: ONE_ACCOUNT,
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		config: { transientCooldownMs: 25, pendingPollMs: 25 },
+		continueBlocks: async () => {
+			await blocked;
+			throw new Error("Cannot continue from message role: assistant");
+		},
+	});
+	await t.fire("session_start");
+	try {
+		await finishError(t, "anthropic", "claude-opus-4-8", "500 server error");
+		await wait(1100);
+		assert.equal(t.rec.continueCalls.length, 1, "the retry must be waiting for continueAgent");
+		await t.fire("agent_end", { messages: [okAssistant(t.ctx.model.provider, t.ctx.model.id)] });
+		release();
+		await wait(30);
+		assert.equal(t.rec.sent.length, 0, "a rejected stale continuation must not inject another prompt");
+	} finally {
+		release();
+		await t.fire("session_shutdown");
+	}
+});
+
+test("successful completion cannot let an old continuation suppress a new task retry", async () => {
+	let release: () => void = () => {};
+	let started: () => void = () => {};
+	const blocked = new Promise<void>((resolve) => { release = resolve; });
+	const continuing = new Promise<void>((resolve) => { started = resolve; });
+	let first = true;
+	const t = setup({
+		accounts: {
+			...TWO_ACCOUNTS,
+			"openai-codex-account-3": { type: "oauth", access: "third-access", refresh: "third-refresh" },
+		},
+		current: { provider: "anthropic", id: "claude-opus-4-8" },
+		continueBlocks: async () => {
+			if (first) {
+				first = false;
+				started();
+				await blocked;
+			}
+		},
+	});
+	try {
+		await t.fire("before_agent_start", {});
+		const err = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
+		await t.fire("message_end", { message: err });
+		const pending = t.fire("agent_end", { messages: [err] });
+		await continuing;
+		await t.fire("agent_end", { messages: [okAssistant(t.ctx.model.provider, t.ctx.model.id)] });
+		await t.fire("before_agent_start", {});
+		await t.fire("agent_start", {});
+		release();
+		await pending;
+		await finishError(t, t.ctx.model.provider, t.ctx.model.id, "429 rate limit");
+		assert.equal(t.rec.continueCalls.length, 2, "the new task must receive its own retry");
+	} finally {
+		release();
+		await t.fire("session_shutdown");
+	}
+});
+
+for (const outcome of ["resolves", "rejects"] as const) {
+	test(`an old continuation that ${outcome} cannot stop a new retry watchdog`, async (context) => {
+		let releaseOld: () => void = () => {};
+		let releaseNew: () => void = () => {};
+		let oldStarted: () => void = () => {};
+		let newStarted: () => void = () => {};
+		const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+		const newBlocked = new Promise<void>((resolve) => { releaseNew = resolve; });
+		const oldReady = new Promise<void>((resolve) => { oldStarted = resolve; });
+		const newReady = new Promise<void>((resolve) => { newStarted = resolve; });
+		let first = true;
+		const t = setup({
+			accounts: {
+				...TWO_ACCOUNTS,
+				"openai-codex-account-3": { type: "oauth", access: "third-access", refresh: "third-refresh" },
+			},
+			current: { provider: "anthropic", id: "claude-opus-4-8" },
+			config: { stuckWatchdogMs: 1000 },
+			continueBlocks: async () => {
+				if (first) {
+					first = false;
+					oldStarted();
+					await oldBlocked;
+					if (outcome === "rejects") throw new Error("Cannot continue from message role: assistant");
+				} else {
+					newStarted();
+					await newBlocked;
+				}
+			},
+		});
+		let oldPending: Promise<unknown> | undefined;
+		let newPending: Promise<unknown> | undefined;
+		try {
+			await t.fire("before_agent_start", {});
+			const oldError = assistantError("anthropic", "claude-opus-4-8", "429 rate limit");
+			await t.fire("message_end", { message: oldError });
+			oldPending = t.fire("agent_end", { messages: [oldError] });
+			await oldReady;
+			await t.fire("agent_end", { messages: [okAssistant(t.ctx.model.provider, t.ctx.model.id)] });
+			await t.fire("before_agent_start", {});
+			await t.fire("agent_start", {});
+			const newError = assistantError(t.ctx.model.provider, t.ctx.model.id, "429 rate limit");
+			await t.fire("message_end", { message: newError });
+			context.mock.timers.enable({ apis: ["setTimeout"] });
+			newPending = t.fire("agent_end", { messages: [newError] });
+			await newReady;
+			releaseOld();
+			await oldPending;
+			assert.equal(t.rec.aborts, 0);
+			assert.equal(t.rec.sent.length, 0, "the old continuation must not inject a stale prompt");
+			context.mock.timers.tick(1000);
+			assert.equal(t.rec.aborts, 1, "the newer stalled retry must retain its watchdog");
+		} finally {
+			releaseOld();
+			releaseNew();
+			await Promise.all([oldPending, newPending]);
+			await t.fire("session_shutdown");
+		}
+	});
+}
 
 test("an un-continuable resume (e.g. tail aborted by the watchdog) recovers by injecting the continuation prompt — never a red error", async () => {
 	const t = setup({
@@ -9340,6 +9504,57 @@ test("a slot published against a parent-owned loopback route counts as usable", 
 	} finally {
 		rmSync(MODELS, { force: true });
 	}
+});
+
+test("user modelOverrides survive proxy publication, rediscovery, and shutdown cleanup", async () => {
+	rmSync(MODELS, { force: true });
+	const modelOverrides = {
+		"claude-opus-5": { contextWindow: 466_384, maxTokens: 64_000 },
+	};
+	writeFileSync(
+		MODELS,
+		JSON.stringify({
+			providers: {
+				anthropic: {
+					api: "anthropic-messages",
+					baseUrl: "https://stale.example.invalid",
+					models: [{ id: "claude-opus-5", contextWindow: 1_000_000 }],
+					modelOverrides,
+				},
+			},
+		}),
+	);
+	const t = setup({
+		current: { provider: "anthropic", id: "claude-opus-5" },
+		accounts: {
+			anthropic: { type: "oauth", access: "a-tok-1", refresh: "a-ref-1" },
+		},
+	});
+	try {
+		await t.fire("session_start");
+		let provider = JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic;
+		assert.match(provider.baseUrl, /^http:\/\/127\.0\.0\.1:/);
+		assert.deepEqual(provider.modelOverrides, modelOverrides);
+
+		// Force rediscovery to replace stale generated routing/catalog data again. The user's
+		// override layer must survive even when provisioning cannot take its no-op fast path.
+		provider.baseUrl = "https://stale-again.example.invalid";
+		provider.models = [{ id: "claude-opus-5", contextWindow: 1_000_000 }];
+		writeFileSync(MODELS, JSON.stringify({ providers: { anthropic: provider } }));
+		await t.command("rediscover");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		provider = JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic;
+		assert.match(provider.baseUrl, /^http:\/\/127\.0\.0\.1:/);
+		assert.deepEqual(provider.modelOverrides, modelOverrides);
+	} finally {
+		await t.fire("session_shutdown");
+	}
+	assert.deepEqual(
+		JSON.parse(readFileSync(MODELS, "utf8")).providers.anthropic,
+		{ modelOverrides },
+		"shutdown must remove the dead loopback route without deleting user model metadata",
+	);
+	rmSync(MODELS, { force: true });
 });
 
 test("with the proxy on, the OAuth slots a child could not use become usable", async () => {

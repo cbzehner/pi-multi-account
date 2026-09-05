@@ -9,16 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cursor streams send headers immediately and keep the client connection open during pauses.** SSE comments arrive every 15 seconds. A five-minute watchdog bounds the wait for decoded upstream progress; heartbeat messages and partial frames do not extend it. Thinking, blob requests, and checkpoints do. Stalled streams end with an explicit timeout error and cancel the bridge. `PI_CURSOR_UPSTREAM_STALL_MS` changes the interval; `0` disables the watchdog.
+- **Successful completion cancels pending automatic retries.** A timeout from an earlier turn no longer injects a continuation after the task has finished. Completion also invalidates retry callbacks already waiting for Pi to become idle or a model switch to finish. Cleanup from an old continuation no longer stops a newer retry’s watchdog.
+- **A Cursor Grok child no longer fails before its first tool runs.** Cursor's OpenAI-compatible adapter composes tool-call identity as `${call_id}\n${item_id}`, joined by one LF rather than the `|` that OpenAI Responses uses. The native controller boundary accepted only the `|` form, so a healthy provider frame was terminated as `malformed_provider_frame (unsupported_tools)` on every attempt and no failover could recover it. Tool-call ids now accept exactly one optional `|`- or LF-joined pair, each half constrained as before and the whole still bounded to 128 characters; tool names, namespaces and route identifiers keep the stricter pattern.
+- **A reasoning-capable Codex child no longer fails on its own reasoning block.** OpenAI Responses streams one reasoning representation and may replace it with a summarized form at `output_item.done`, so requiring the final `thinking_end` content to equal the concatenated deltas rejected a well-formed stream. Reasoning still never crosses the controller boundary and remains bounded by the output cap, but its final value is no longer required to be byte-identical to the streamed deltas.
+- **Malformed-frame terminals now say which frame was rejected.** Block start/delta/end, unsupported stream events and truncated blocks carry distinct fixed reasons instead of one undifferentiated `malformed_provider_frame`, so a live failure names its own cause.
+
+## [1.21.2] - 2026-09-04
+
+### Fixed
+
 - **A second concurrent Pi session no longer hangs before it can submit prompts.** When another process owns the canonical child-proxy port, the fallback listener now retries on an ephemeral port on the next event-loop turn and resolves from a standalone `listening` handler. This avoids leaving `session_start` pending forever under Pi's compiled Bun runtime after `EADDRINUSE`.
-- **Long silent Cursor thinks no longer fail with `Request timed out.`** The proxy now flushes SSE headers as soon as a stream opens and writes an SSE comment every 15 seconds until the turn ends. Before, `writeHead()` alone left the head buffered until the first token, so during a multi-minute think the client had received nothing, Pi aborted around the 5-minute mark, and failover re-sent (and re-billed) the prompt.
-- **Turns that Cursor silently abandons now end with an explicit error instead of hanging forever.** With keepalives holding the client connection open, nothing downstream could end a turn whose upstream h2 stream stayed up but never produced another frame. The proxy now watches upstream progress: after 5 minutes without a decoded non-heartbeat message (thinking deltas, blob traffic, and checkpoints all count; heartbeats and partial frames do not), the stream ends with `Cursor produced no output for 5m; stream timed out`, the bridge is cancelled, and failover can react. `PI_CURSOR_UPSTREAM_STALL_MS` adjusts the window; `0` disables it.
-
-- **Successful completion cancels pending retries, including callbacks already waiting for Pi to become idle.** A previous timeout can no longer inject a continuation prompt after the task has finished.
-
-### Tests
-
-- Added `test/cursor-upstream-watchdog.test.ts`: timer lifecycle, timeout configuration, and the actual proxy handling heartbeat-only traffic, partial frames, thinking, checkpoints, and disconnects.
-- Added failover regressions for completion before a scheduled retry and completion while a resume waits for Pi to become idle.
+- **Slot provisioning no longer deletes user-authored model metadata.** Existing `modelOverrides` entries — including per-model `contextWindow` and `maxTokens` — now survive startup publication, `/multi-account rediscover`, catalog replacement, and loopback shutdown cleanup. Generated proxy routes are still removed when their owner exits, so preserving the override layer cannot leave a dead port or credential behind.
 
 ## [1.21.1] - 2026-09-03
 
